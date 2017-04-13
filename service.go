@@ -29,8 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/satori/go.uuid"
 )
 
 const (
@@ -63,10 +62,13 @@ type Service struct {
 	verbose          bool
 	simulate         bool // Dry run (NOP)
 	keepFilesPattern *regexp.Regexp
+}
 
-	mongoDbURI *url.URL // Can be nil: checksum checks are disabled
-	dbSession  *mgo.Session
-	col        *mgo.Collection
+type Signature struct {
+	PublicID  string `json:"public_id"`
+	Timestamp string `json:"timestamp"`
+	ApiKey    string `json:"api_key"`
+	Signature string `json:"signature"`
 }
 
 // Resource holds information about an image or a raw file.
@@ -80,12 +82,12 @@ type Resource struct {
 }
 
 type pagination struct {
-	NextCursor int64 `json: "next_cursor"`
+	NextCursor int64 `json:"next_cursor"`
 }
 
 type resourceList struct {
 	pagination
-	Resources []*Resource `json: "resources"`
+	Resources []*Resource `json:"resources"`
 }
 
 type ResourceDetails struct {
@@ -186,35 +188,6 @@ func (s *Service) KeepFiles(pattern string) error {
 	return nil
 }
 
-// UseDatabase connects to a mongoDB database and stores upload JSON
-// responses, along with a source file checksum to prevent uploading
-// the same file twice. Stored information is used by Url() to build
-// a public URL for accessing the uploaded resource.
-func (s *Service) UseDatabase(mongoDbURI string) error {
-	u, err := url.Parse(mongoDbURI)
-	if err != nil {
-		return err
-	}
-	if u.Scheme != "mongodb" {
-		return errors.New("Missing mongodb:// scheme in URI")
-	}
-	s.mongoDbURI = u
-
-	if s.verbose {
-		log.Printf("Connecting to database %s/%s ... ", u.Host, u.Path[1:])
-	}
-	dbSession, err := mgo.Dial(mongoDbURI)
-	if err != nil {
-		return err
-	}
-	if s.verbose {
-		log.Println("Connected")
-	}
-	s.dbSession = dbSession
-	s.col = s.dbSession.DB(s.mongoDbURI.Path[1:]).C("sync")
-	return nil
-}
-
 // CloudName returns the cloud name used to access the Cloudinary service.
 func (s *Service) CloudName() string {
 	return s.cloudName
@@ -301,36 +274,6 @@ func (s *Service) uploadFile(fullPath string, data io.Reader, randomPublicId boo
 		return fullPath, nil
 		if s.verbose {
 			fmt.Println("Not uploading empty file: ", fullPath)
-		}
-	}
-	// First check we have no match before sending an HTTP query
-	changedLocally := false
-	if s.dbSession != nil {
-		publicId := cleanAssetName(fullPath, s.basePathDir, s.prependPath)
-		ext := filepath.Ext(fullPath)
-		match := &uploadResponse{}
-		err := s.col.Find(bson.M{"$or": []bson.M{bson.M{"_id": publicId}, bson.M{"_id": publicId + ext}}}).One(&match)
-		if err == nil {
-			// Current file checksum
-			chk, err := fileChecksum(fullPath)
-			if err != nil {
-				return fullPath, err
-			}
-			if chk == match.Checksum {
-				if s.verbose {
-					fmt.Printf("%s: no local changes\n", fullPath)
-				} else {
-					fmt.Printf(".")
-				}
-				return fullPath, nil
-			} else {
-				if s.verbose {
-					fmt.Println("File has changed locally, needs upload")
-				} else {
-					fmt.Printf("U")
-				}
-				changedLocally = true
-			}
 		}
 	}
 	buf := new(bytes.Buffer)
@@ -435,25 +378,6 @@ func (s *Service) uploadFile(fullPath string, data io.Reader, randomPublicId boo
 		if err := dec.Decode(upInfo); err != nil {
 			return fullPath, err
 		}
-		// Write info to db
-		if s.dbSession != nil {
-			// Compute file's checksum
-			chk, err := fileChecksum(fullPath)
-			if err != nil {
-				return fullPath, err
-			}
-			upInfo.Id = upInfo.PublicId // Force document id
-			upInfo.Checksum = chk
-			if changedLocally {
-				if err := s.col.Update(bson.M{"_id": upInfo.PublicId}, upInfo); err != nil {
-					return fullPath, err
-				}
-			} else {
-				if err := s.col.Insert(upInfo); err != nil {
-					return fullPath, err
-				}
-			}
-		}
 		return upInfo.PublicId, nil
 	} else {
 		return fullPath, errors.New("Request error: " + resp.Status)
@@ -528,6 +452,21 @@ func (s *Service) Upload(path string, data io.Reader, prepend string, randomPubl
 		return s.uploadFile(path, data, randomPublicId)
 	}
 	return path, nil
+}
+
+func (s *Service) Sign(public_id string) (*Signature) {
+	t := new(Signature)
+	t.PublicID = public_id
+	if t.PublicID == "" {
+		t.PublicID = uuid.NewV4().String()
+	}
+	t.ApiKey = s.apiKey
+	t.Timestamp = strconv.Itoa(int(time.Now().Unix()))
+	hash := sha1.New()
+	part := fmt.Sprintf("public_id=%s&timestamp=%s%s", t.PublicID, t.Timestamp, s.apiSecret)
+	io.WriteString(hash, part)
+	t.Signature = fmt.Sprintf("%x", hash.Sum(nil))
+	return t
 }
 
 // Url returns the complete access path in the cloud to the
@@ -606,12 +545,6 @@ func (s *Service) Delete(publicId, prepend string, rtype ResourceType) error {
 	}
 	if e, ok := m["result"]; ok {
 		fmt.Println(e.(string))
-	}
-	// Remove DB entry
-	if s.dbSession != nil {
-		if err := s.col.Remove(bson.M{"_id": prepend + publicId}); err != nil {
-			return errors.New("can't remove entry from DB: " + err.Error())
-		}
 	}
 	return nil
 }
