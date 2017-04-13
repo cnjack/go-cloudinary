@@ -69,6 +69,7 @@ type Signature struct {
 	Timestamp string `json:"timestamp"`
 	ApiKey    string `json:"api_key"`
 	Signature string `json:"signature"`
+	CloudName string `json:"cloud_name"`
 }
 
 // Resource holds information about an image or a raw file.
@@ -461,6 +462,7 @@ func (s *Service) Sign(public_id string) (*Signature) {
 		t.PublicID = uuid.NewV4().String()
 	}
 	t.ApiKey = s.apiKey
+	t.CloudName = s.CloudName()
 	t.Timestamp = strconv.Itoa(int(time.Now().Unix()))
 	hash := sha1.New()
 	part := fmt.Sprintf("public_id=%s&timestamp=%s%s", t.PublicID, t.Timestamp, s.apiSecret)
