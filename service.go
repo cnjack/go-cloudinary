@@ -28,8 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/satori/go.uuid"
 )
 
 const (
@@ -455,17 +453,20 @@ func (s *Service) Upload(path string, data io.Reader, prepend string, randomPubl
 	return path, nil
 }
 
-func (s *Service) Sign(public_id string) (*Signature) {
+func (s *Service) Sign(public_id string, callback string, eager string) *Signature {
 	t := new(Signature)
 	t.PublicID = public_id
-	if t.PublicID == "" {
-		t.PublicID = uuid.NewV4().String()
-	}
+
 	t.ApiKey = s.apiKey
 	t.CloudName = s.CloudName()
 	t.Timestamp = strconv.Itoa(int(time.Now().Unix()))
 	hash := sha1.New()
-	part := fmt.Sprintf("public_id=%s&timestamp=%s%s", t.PublicID, t.Timestamp, s.apiSecret)
+	part := ""
+	if t.PublicID == "" {
+		part = fmt.Sprintf("callback=%s&eager=%s&timestamp=%s%s", callback, eager, t.Timestamp, s.apiSecret)
+	} else {
+		part = fmt.Sprintf("callback=%s&eager=%s&public_id=%s&timestamp=%s%s", callback, eager, t.PublicID, t.Timestamp, s.apiSecret)
+	}
 	io.WriteString(hash, part)
 	t.Signature = fmt.Sprintf("%x", hash.Sum(nil))
 	return t
